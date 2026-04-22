@@ -25,7 +25,10 @@ import {
   ensureReplayAssistantMessage,
   getTrackedReplayAssistantMessageId,
 } from "./acpReplayAssistant";
-import { getLocalSessionId } from "./acpSessionTracker";
+import {
+  getLocalSessionId,
+  subscribeToSessionRegistration,
+} from "./acpSessionTracker";
 import { perfLog } from "@/shared/lib/perfLog";
 
 // Pre-set message ID for the next live stream per goose session
@@ -44,6 +47,20 @@ interface LivePerf {
   chunkCount: number;
 }
 const livePerf = new Map<string, LivePerf>();
+const pendingUsageUpdates = new Map<
+  string,
+  { accumulatedTotal: number; contextLimit: number }
+>();
+
+subscribeToSessionRegistration((localSessionId, gooseSessionId) => {
+  const pendingUsage = pendingUsageUpdates.get(gooseSessionId);
+  if (!pendingUsage) {
+    return;
+  }
+
+  useChatStore.getState().updateTokenState(localSessionId, pendingUsage);
+  pendingUsageUpdates.delete(gooseSessionId);
+});
 
 export function setActiveMessageId(
   gooseSessionId: string,
@@ -78,7 +95,8 @@ export async function handleSessionNotification(
   notification: SessionNotification,
 ): Promise<void> {
   const gooseSessionId = notification.sessionId;
-  const sessionId = getLocalSessionId(gooseSessionId) ?? gooseSessionId;
+  const localSessionId = getLocalSessionId(gooseSessionId);
+  const sessionId = localSessionId ?? gooseSessionId;
   const { update } = notification;
   const isReplay = useChatStore.getState().loadingSessionIds.has(sessionId);
 
@@ -93,7 +111,7 @@ export async function handleSessionNotification(
     }
     perf.lastAt = now;
     perf.count += 1;
-    handleReplay(sessionId, gooseSessionId, update);
+    handleReplay(sessionId, gooseSessionId, localSessionId, update);
   } else {
     const perf = livePerf.get(gooseSessionId);
     if (perf && update.sessionUpdate === "agent_message_chunk") {
@@ -106,7 +124,7 @@ export async function handleSessionNotification(
         );
       }
     }
-    handleLive(sessionId, gooseSessionId, update);
+    handleLive(sessionId, gooseSessionId, localSessionId, update);
   }
 }
 
@@ -125,6 +143,7 @@ export function clearReplayPerf(sessionId: string): void {
 function handleReplay(
   sessionId: string,
   gooseSessionId: string,
+  localSessionId: string | null,
   update: SessionUpdate,
 ): void {
   switch (update.sessionUpdate) {
@@ -247,7 +266,7 @@ function handleReplay(
     case "session_info_update":
     case "config_option_update":
     case "usage_update":
-      handleShared(sessionId, update);
+      handleShared(sessionId, gooseSessionId, localSessionId, update);
       break;
 
     default:
@@ -258,6 +277,7 @@ function handleReplay(
 function handleLive(
   sessionId: string,
   gooseSessionId: string,
+  localSessionId: string | null,
   update: SessionUpdate,
 ): void {
   const store = useChatStore.getState();
@@ -350,7 +370,7 @@ function handleLive(
     case "session_info_update":
     case "config_option_update":
     case "usage_update":
-      handleShared(sessionId, update);
+      handleShared(sessionId, gooseSessionId, localSessionId, update);
       break;
 
     default:
@@ -358,7 +378,12 @@ function handleLive(
   }
 }
 
-function handleShared(sessionId: string, update: SessionUpdate): void {
+function handleShared(
+  sessionId: string,
+  gooseSessionId: string,
+  localSessionId: string | null,
+  update: SessionUpdate,
+): void {
   switch (update.sessionUpdate) {
     case "session_info_update": {
       const info = update as SessionUpdate & {
@@ -410,7 +435,6 @@ function handleShared(sessionId: string, update: SessionUpdate): void {
             currentModelId;
 
           const sessionStore = useChatSessionStore.getState();
-          sessionStore.setSessionModels(sessionId, availableModels);
           sessionStore.updateSession(
             sessionId,
             { modelId: currentModelId, modelName: currentModelName },
@@ -423,7 +447,16 @@ function handleShared(sessionId: string, update: SessionUpdate): void {
 
     case "usage_update": {
       const usage = update as SessionUpdate & { sessionUpdate: "usage_update" };
-      useChatStore.getState().updateTokenState(sessionId, {
+
+      if (!localSessionId) {
+        pendingUsageUpdates.set(gooseSessionId, {
+          accumulatedTotal: usage.used,
+          contextLimit: usage.size,
+        });
+        break;
+      }
+
+      useChatStore.getState().updateTokenState(localSessionId, {
         accumulatedTotal: usage.used,
         contextLimit: usage.size,
       });
@@ -485,6 +518,7 @@ function ensureLiveAssistantMessage(
 
 export function clearMessageTracking(): void {
   presetMessageIds.clear();
+  pendingUsageUpdates.clear();
   clearReplayAssistantTracking();
 }
 

@@ -40,7 +40,6 @@ import type {
   MessageContent,
   TextContent,
   ImageContent,
-  McpAppContent,
   ToolResponseContent,
   ThinkingContent,
   ReasoningContent as ReasoningContentType,
@@ -226,10 +225,8 @@ function renderContentBlock(
     case "toolResponse":
       // Handled by groupContentSections toolChain rendering
       return null;
-    case "mcpApp": {
-      const mcpApp = content as McpAppContent;
-      return <McpAppView key={`mcp-app-${index}`} payload={mcpApp.payload} />;
-    }
+    case "mcpApp":
+      return <McpAppView key={`mcp-app-${index}`} payload={content.payload} />;
     case "thinking": {
       const th = content as ThinkingContent;
       return (
